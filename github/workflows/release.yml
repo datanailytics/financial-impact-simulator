@@ -1,0 +1,315 @@
+name: Release Management
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Is this a pre-release?'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  # Validate Release
+  validate:
+    name: Validate Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      changelog: ${{ steps.changelog.outputs.changelog }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          
+          # Validate semantic version
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+)?(\+[0-9A-Za-z-]+)?$ ]]; then
+            echo "Error: Invalid version format. Must be semantic version (e.g., v1.0.0)"
+            exit 1
+          fi
+
+      - name: Check if tag exists
+        run: |
+          if git rev-parse "${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "Tag already exists"
+            exit 1
+          fi
+
+      - name: Generate changelog
+        id: changelog
+        uses: TriPSs/conventional-changelog-action@v5
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          version-file: './package.json'
+          version-path: 'version'
+          skip-version-file: false
+          skip-commit: true
+          skip-tag: true
+          output-file: false
+
+  # Build Release Assets
+  build-assets:
+    name: Build Release Assets
+    runs-on: ${{ matrix.os }}
+    needs: validate
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            artifact: linux
+          - os: windows-latest
+            artifact: windows
+          - os: macos-latest
+            artifact: macos
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          npm run build:release
+          npm run package:${{ matrix.artifact }}
+
+      - name: Sign artifacts (macOS)
+        if: matrix.os == 'macos-latest'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+        run: |
+          npm run sign:macos
+          npm run notarize:macos
+
+      - name: Create archive
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            7z a -tzip "financial-simulator-${{ needs.validate.outputs.version }}-${{ matrix.artifact }}.zip" ./dist/*
+          else
+            tar -czf "financial-simulator-${{ needs.validate.outputs.version }}-${{ matrix.artifact }}.tar.gz" -C dist .
+          fi
+        shell: bash
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: release-${{ matrix.artifact }}
+          path: |
+            *.zip
+            *.tar.gz
+
+  # Create GitHub Release
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [validate, build-assets]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: release-artifacts
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.validate.outputs.version }}
+          release_name: Release ${{ needs.validate.outputs.version }}
+          body: ${{ needs.validate.outputs.changelog }}
+          draft: false
+          prerelease: ${{ github.event.inputs.prerelease || false }}
+
+      - name: Upload Release Assets
+        run: |
+          for file in release-artifacts/release-*/*; do
+            asset_name=$(basename "$file")
+            echo "Uploading $asset_name"
+            gh release upload "${{ needs.validate.outputs.version }}" "$file" \
+              --clobber \
+              --repo "${{ github.repository }}"
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Publish to Package Registries
+  publish:
+    name: Publish Packages
+    runs-on: ubuntu-latest
+    needs: [validate, create-release]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Update version
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          VERSION="${VERSION#v}"  # Remove 'v' prefix
+          npm version $VERSION --no-git-tag-version
+
+      - name: Publish to NPM
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish to GitHub Packages
+        uses: actions/setup-node@v4
+        with:
+          registry-url: 'https://npm.pkg.github.com'
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Update Documentation
+  update-docs:
+    name: Update Documentation
+    runs-on: ubuntu-latest
+    needs: [validate, create-release]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update version in docs
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          sed -i "s/version: .*/version: $VERSION/" docs/config.yml
+          sed -i "s/\"version\": \".*\"/\"version\": \"${VERSION#v}\"/" package.json
+
+      - name: Generate API documentation
+        run: |
+          npm ci
+          npm run docs:api
+          npm run docs:components
+
+      - name: Commit documentation updates
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "docs: update documentation for ${{ needs.validate.outputs.version }}"
+          branch: main
+          file_pattern: docs/** package.json
+
+  # Post-release tasks
+  post-release:
+    name: Post Release Tasks
+    runs-on: ubuntu-latest
+    needs: [validate, create-release, publish]
+    steps:
+      - name: Create release branch
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          BRANCH="release/${VERSION}"
+          git checkout -b "$BRANCH"
+          git push origin "$BRANCH"
+
+      - name: Update milestone
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const version = '${{ needs.validate.outputs.version }}';
+            const milestones = await github.rest.issues.listMilestones({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open'
+            });
+            
+            const milestone = milestones.data.find(m => m.title === version);
+            if (milestone) {
+              await github.rest.issues.updateMilestone({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                milestone_number: milestone.number,
+                state: 'closed'
+              });
+            }
+
+      - name: Create next milestone
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const version = '${{ needs.validate.outputs.version }}';
+            const [major, minor, patch] = version.substring(1).split('.').map(Number);
+            const nextVersion = `v${major}.${minor}.${patch + 1}`;
+            
+            await github.rest.issues.createMilestone({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: nextVersion,
+              description: `Next patch release after ${version}`
+            });
+
+      - name: Send release notification
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              text: "🚀 New Release Published!",
+              attachments: [{
+                color: 'good',
+                fields: [
+                  {
+                    title: 'Version',
+                    value: '${{ needs.validate.outputs.version }}',
+                    short: true
+                  },
+                  {
+                    title: 'Release URL',
+                    value: 'https://github.com/${{ github.repository }}/releases/tag/${{ needs.validate.outputs.version }}',
+                    short: false
+                  }
+                ]
+              }]
+            }
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}

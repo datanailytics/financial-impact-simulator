@@ -1,0 +1,240 @@
+# Bandit configuration file for Financial Simulator security scanning
+# Documentation: https://bandit.readthedocs.io/en/latest/config.html
+
+# Tests to run
+tests:
+  - B101  # assert_used
+  - B102  # exec_used
+  - B103  # set_bad_file_permissions
+  - B104  # hardcoded_bind_all_interfaces
+  - B105  # hardcoded_password_string
+  - B106  # hardcoded_password_funcarg
+  - B107  # hardcoded_password_default
+  - B108  # hardcoded_tmp_directory
+  - B110  # try_except_pass
+  - B112  # try_except_continue
+  - B201  # flask_debug_true
+  - B301  # pickle
+  - B302  # marshal
+  - B303  # md5
+  - B304  # des
+  - B305  # cipher
+  - B306  # mktemp_q
+  - B307  # eval
+  - B308  # mark_safe
+  - B309  # httpsconnection
+  - B310  # urllib_urlopen
+  - B311  # random
+  - B312  # telnetlib
+  - B313  # xml_bad_cElementTree
+  - B314  # xml_bad_ElementTree
+  - B315  # xml_bad_expatreader
+  - B316  # xml_bad_expatbuilder
+  - B317  # xml_bad_sax
+  - B318  # xml_bad_minidom
+  - B319  # xml_bad_pulldom
+  - B320  # xml_bad_etree
+  - B321  # ftplib
+  - B322  # input
+  - B323  # unverified_context
+  - B324  # hashlib_new_insecure_functions
+  - B325  # tempnam
+  - B401  # import_telnetlib
+  - B402  # import_ftplib
+  - B403  # import_pickle
+  - B404  # import_subprocess
+  - B405  # import_xml_etree
+  - B406  # import_xml_sax
+  - B407  # import_xml_expat
+  - B408  # import_xml_minidom
+  - B409  # import_xml_pulldom
+  - B410  # import_lxml
+  - B411  # import_xmlrpclib
+  - B412  # import_httpoxy
+  - B413  # import_pycrypto
+  - B501  # request_with_no_cert_validation
+  - B502  # ssl_with_bad_version
+  - B503  # ssl_with_bad_defaults
+  - B504  # ssl_with_no_version
+  - B505  # weak_cryptographic_key
+  - B506  # yaml_load
+  - B507  # ssh_no_host_key_verification
+  - B601  # paramiko_calls
+  - B602  # subprocess_popen_with_shell_equals_true
+  - B603  # subprocess_without_shell_equals_true
+  - B604  # any_other_function_with_shell_equals_true
+  - B605  # start_process_with_a_shell
+  - B606  # start_process_with_no_shell
+  - B607  # start_process_with_partial_path
+  - B608  # hardcoded_sql_expressions
+  - B609  # linux_commands_wildcard_injection
+  - B610  # django_extra_used
+  - B611  # django_rawsql_used
+  - B701  # jinja2_autoescape_false
+  - B702  # use_of_mako_templates
+  - B703  # django_mark_safe
+
+# Tests to skip
+skips:
+  - B404  # Allow subprocess for legitimate system operations
+  - B603  # Allow subprocess without shell=True for safe operations
+
+# Exclude paths and patterns
+exclude_dirs:
+  - '/tests/'
+  - '/test/'
+  - '/.tox/'
+  - '/venv/'
+  - '/.venv/'
+  - '/env/'
+  - '/.env/'
+  - '/migrations/'
+  - '/node_modules/'
+  - '/.git/'
+  - '/__pycache__/'
+  - '/.pytest_cache/'
+  - '/.mypy_cache/'
+  - '/htmlcov/'
+  - '/docs/'
+  - '/build/'
+  - '/dist/'
+  - '/.eggs/'
+  - '*.egg-info/'
+
+# Include patterns
+include:
+  - '*.py'
+  - '*.pyw'
+
+# Exclude specific files
+exclude:
+  - '*/test_*.py'
+  - '*_test.py'
+  - '*/tests.py'
+  - 'setup.py'
+  - 'conftest.py'
+
+# Plugin configurations
+any_other_function_with_shell_equals_true:
+  no_shell:
+    - os.execl
+    - os.execle
+    - os.execlp
+    - os.execlpe
+    - os.execv
+    - os.execve
+    - os.execvp
+    - os.execvpe
+    - os.spawnl
+    - os.spawnle
+    - os.spawnlp
+    - os.spawnlpe
+    - os.spawnv
+    - os.spawnve
+    - os.spawnvp
+    - os.spawnvpe
+    - os.startfile
+  shell:
+    - os.system
+    - os.popen
+    - os.popen2
+    - os.popen3
+    - os.popen4
+    - popen2.popen2
+    - popen2.popen3
+    - popen2.popen4
+    - popen2.Popen3
+    - popen2.Popen4
+    - commands.getoutput
+    - commands.getstatusoutput
+
+hardcoded_password_string:
+  # Words to look for when identifying hardcoded passwords
+  word_list:
+    - password
+    - pass
+    - passwd
+    - pwd
+    - secret
+    - token
+    - secrete
+    - api_key
+    - apikey
+    - access_key
+    - auth_token
+    - credentials
+    - cipher
+    - private_key
+
+# Assert statement configuration
+assert_used:
+  skips:
+    - '*/test_*.py'
+    - '*_test.py'
+    - '*/tests/*.py'
+
+# SQL injection configuration
+hardcoded_sql_expressions:
+  # Additional SQL keywords to check
+  sql_statements:
+    - SELECT
+    - INSERT
+    - UPDATE
+    - DELETE
+    - DROP
+    - CREATE
+    - ALTER
+    - EXEC
+    - EXECUTE
+    - UNION
+
+# Severity levels for different issues
+# Options: LOW, MEDIUM, HIGH
+severity:
+  - B301: HIGH   # Pickle usage
+  - B302: HIGH   # Marshal usage
+  - B303: MEDIUM # MD5 usage
+  - B304: HIGH   # DES usage
+  - B305: HIGH   # Weak cipher usage
+  - B306: MEDIUM # mktemp usage
+  - B307: HIGH   # eval usage
+  - B311: LOW    # Random usage (for non-crypto)
+  - B320: MEDIUM # XML parsing
+  - B321: MEDIUM # FTP usage
+  - B322: MEDIUM # input() usage
+  - B324: HIGH   # Weak hash functions
+  - B501: HIGH   # No cert validation
+  - B502: HIGH   # SSL with bad version
+  - B601: HIGH   # Paramiko calls
+  - B602: HIGH   # Shell injection
+
+# Confidence levels
+# Options: LOW, MEDIUM, HIGH
+confidence:
+  - B301: HIGH
+  - B302: HIGH
+  - B303: MEDIUM
+  - B304: HIGH
+  - B305: HIGH
+  - B306: MEDIUM
+  - B307: HIGH
+  - B311: MEDIUM
+  - B320: HIGH
+  - B321: MEDIUM
+  - B322: LOW
+  - B324: HIGH
+  - B501: HIGH
+  - B502: HIGH
+  - B601: HIGH
+  - B602: HIGH
+
+# Output format configuration
+output_format: json
+output_file: bandit-report.json
+
+# Additional settings
+recursive: true
+aggregate: file
+number: 5
+context_lines: 3
+profile: default

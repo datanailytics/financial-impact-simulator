@@ -1,0 +1,264 @@
+# Safety policy configuration for vulnerability scanning
+# This file defines security policies for the Financial Simulator project
+# Used with: safety check --policy-file .safety-policy.yml
+
+# Security policy metadata
+version: '2.0'
+project:
+  name: 'Financial Simulator'
+  description: 'Security policy for financial analysis and simulation platform'
+  
+# Vulnerability scanning configuration
+scanning:
+  # Fail build on vulnerabilities with CVSS score >= threshold
+  fail_threshold: 7.0
+  
+  # Scan configuration
+  check_development_dependencies: true
+  check_unpinned_requirements: true
+  
+  # Auto-fix configuration
+  auto_remediate: false
+  auto_remediate_limit: 10
+
+# Vulnerability severity levels
+severity_levels:
+  critical:
+    cvss_threshold: 9.0
+    action: 'fail'
+    notify: true
+  high:
+    cvss_threshold: 7.0
+    action: 'fail'
+    notify: true
+  medium:
+    cvss_threshold: 4.0
+    action: 'warn'
+    notify: true
+  low:
+    cvss_threshold: 0.0
+    action: 'log'
+    notify: false
+
+# Ignored vulnerabilities with justification
+ignore_vulnerabilities:
+  # Example format - add actual vulnerabilities as needed
+  # - id: 'CVE-2021-12345'
+  #   reason: 'Not applicable to our use case - only affects Windows systems'
+  #   expires: '2025-12-31'
+  
+  # - id: 'PYSEC-2021-123'
+  #   reason: 'Fixed in our fork, waiting for upstream merge'
+  #   expires: '2025-06-30'
+
+# Package-specific policies
+packages:
+  numpy:
+    # Numpy vulnerabilities often have limited impact on financial calculations
+    min_version: '1.21.0'
+    severity_adjustment: -1
+    
+  pandas:
+    # Critical for financial data processing
+    min_version: '1.3.0'
+    severity_adjustment: 0
+    
+  tensorflow:
+    # ML models - security critical
+    min_version: '2.11.0'
+    severity_adjustment: +1
+    
+  requests:
+    # External API calls - high security priority
+    min_version: '2.28.0'
+    severity_adjustment: +1
+    
+  cryptography:
+    # Encryption library - maximum security priority
+    min_version: '39.0.0'
+    severity_adjustment: +2
+    auto_update: true
+
+# Dependency constraints
+constraints:
+  # Disallow packages with known security issues
+  disallowed_packages:
+    - pycrypto  # Use cryptography instead
+    - md5       # Use hashlib with SHA256+
+    - pickle5   # Security risks with deserialization
+    
+  # Required security packages
+  required_packages:
+    - cryptography
+    - certifi
+    - safety
+    - bandit
+
+# License policies
+licenses:
+  # Allowed licenses for dependencies
+  allowed:
+    - 'MIT'
+    - 'Apache-2.0'
+    - 'BSD-3-Clause'
+    - 'BSD-2-Clause'
+    - 'ISC'
+    - 'Python-2.0'
+    - 'PSF-2.0'
+    - 'LGPL-3.0'
+    - 'LGPL-2.1'
+    
+  # Explicitly denied licenses
+  denied:
+    - 'GPL-3.0'  # Copyleft concerns
+    - 'AGPL-3.0' # Strong copyleft
+    - 'SSPL'     # MongoDB license
+    - 'Commons-Clause'
+    
+  # Require license review
+  review_required:
+    - 'GPL-2.0'
+    - 'LGPL-2.0'
+    - 'MPL-2.0'
+
+# Notification settings
+notifications:
+  # Email notifications
+  email:
+    enabled: true
+    recipients:
+      - security@example.com
+      - devops@example.com
+    on_events:
+      - critical_vulnerability
+      - high_vulnerability
+      - license_violation
+      
+  # Slack notifications
+  slack:
+    enabled: true
+    webhook_url: '${SLACK_SECURITY_WEBHOOK}'
+    channel: '#security-alerts'
+    on_events:
+      - critical_vulnerability
+      - high_vulnerability
+      
+  # JIRA integration
+  jira:
+    enabled: false
+    url: 'https://company.atlassian.net'
+    project: 'SEC'
+    issue_type: 'Security Vulnerability'
+    
+# Reporting configuration
+reporting:
+  # Report formats
+  formats:
+    - json
+    - html
+    - markdown
+    
+  # Output locations
+  output_dir: './security-reports'
+  
+  # Report retention
+  retention_days: 90
+  
+  # Include in reports
+  include:
+    - vulnerability_details
+    - remediation_suggestions
+    - dependency_tree
+    - license_summary
+    - cvss_scores
+    
+# CI/CD integration
+ci_cd:
+  # GitHub Actions
+  github_actions:
+    enabled: true
+    create_issues: true
+    block_pr: true
+    comment_on_pr: true
+    
+  # GitLab CI
+  gitlab_ci:
+    enabled: false
+    create_issues: false
+    block_mr: true
+    
+  # Jenkins
+  jenkins:
+    enabled: false
+    fail_build: true
+
+# Remediation policies
+remediation:
+  # Auto-update rules
+  auto_update:
+    enabled: false  # Manual review required
+    types:
+      - patch  # Auto-update patch versions
+      - minor  # Review minor updates
+      - major  # Manual major updates
+      
+  # Update schedule
+  schedule:
+    frequency: 'weekly'
+    day: 'sunday'
+    time: '02:00'
+    
+  # Testing requirements
+  testing:
+    required: true
+    min_coverage: 0.80
+    regression_tests: true
+
+# Compliance standards
+compliance:
+  standards:
+    - 'OWASP Top 10'
+    - 'CWE Top 25'
+    - 'PCI DSS'  # If handling payment data
+    - 'SOC 2'
+    
+  # Audit settings
+  audit:
+    enabled: true
+    frequency: 'monthly'
+    retention_period: '2 years'
+    
+# Environment-specific policies
+environments:
+  development:
+    fail_threshold: 4.0
+    auto_remediate: true
+    
+  staging:
+    fail_threshold: 7.0
+    auto_remediate: false
+    
+  production:
+    fail_threshold: 7.0
+    auto_remediate: false
+    require_approval: true
+
+# Custom rules
+custom_rules:
+  # Check for outdated packages
+  - name: 'outdated_packages'
+    description: 'Flag packages not updated in 6 months'
+    threshold_days: 180
+    severity: 'medium'
+    
+  # Check for pre-release versions
+  - name: 'prerelease_check'
+    description: 'Disallow pre-release versions in production'
+    environments: ['staging', 'production']
+    severity: 'high'
+    
+  # Dependency depth check
+  - name: 'dependency_depth'
+    description: 'Warn on deep dependency trees'
+    max_depth: 5
+    severity: 'low'

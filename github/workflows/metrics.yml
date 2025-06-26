@@ -1,0 +1,326 @@
+name: Metrics Collection
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:
+  push:
+    branches: [ main, develop ]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  actions: read
+
+jobs:
+  # Code Metrics
+  code-metrics:
+    name: Code Quality Metrics
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          pip install radon lizard
+
+      - name: Calculate code complexity
+        run: |
+          echo "## JavaScript Complexity" > metrics/complexity.md
+          npx complexity-report-cli src/**/*.js --format markdown >> metrics/complexity.md
+          
+          echo "## Python Complexity" >> metrics/complexity.md
+          radon cc src -s -a >> metrics/complexity.md
+          
+          echo "## Cyclomatic Complexity" >> metrics/complexity.md
+          lizard src -l javascript -l python >> metrics/complexity.md
+
+      - name: Code coverage analysis
+        run: |
+          npm run test:coverage
+          npx nyc report --reporter=json --reporter=html
+          
+          # Generate coverage trends
+          node scripts/coverage-trends.js
+
+      - name: Technical debt analysis
+        run: |
+          npx code-complexity src --format json > metrics/tech-debt.json
+          npx jscpd src --reporters json --output metrics/
+          
+          # Calculate tech debt score
+          node scripts/calculate-tech-debt.js
+
+      - name: Bundle size analysis
+        run: |
+          npm run build
+          npx bundlesize --config .bundlesizerc.json
+          npx webpack-bundle-analyzer dist/stats.json dist -m json -r metrics/bundle-report.json
+
+      - name: Dependencies audit
+        run: |
+          npm audit --json > metrics/npm-audit.json || true
+          npx depcheck --json > metrics/unused-deps.json
+          npx npm-check-updates --jsonUpgraded > metrics/outdated-deps.json
+
+      - name: Upload metrics
+        uses: actions/upload-artifact@v3
+        with:
+          name: code-metrics
+          path: metrics/
+
+  # Performance Metrics
+  performance-metrics:
+    name: Performance Metrics
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup environment
+        run: |
+          npm ci
+          npm run build
+
+      - name: Start application
+        run: |
+          npm run start:prod &
+          npx wait-on http://localhost:3000
+
+      - name: Run Lighthouse metrics
+        uses: treosh/lighthouse-ci-action@v10
+        with:
+          urls: |
+            http://localhost:3000
+            http://localhost:3000/dashboard
+            http://localhost:3000/analytics
+          uploadArtifacts: true
+          temporaryPublicStorage: true
+          runs: 3
+
+      - name: Web Vitals monitoring
+        run: |
+          npx web-vitals-cli http://localhost:3000 --json > metrics/web-vitals.json
+          node scripts/analyze-web-vitals.js
+
+      - name: Load testing
+        run: |
+          npm install -g artillery
+          artillery run tests/load/performance.yml --output metrics/load-test.json
+          artillery report metrics/load-test.json
+
+      - name: Memory profiling
+        run: |
+          node --expose-gc scripts/memory-profile.js
+          mv heap-*.heapsnapshot metrics/
+
+  # Repository Metrics
+  repo-metrics:
+    name: Repository Analytics
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Git statistics
+        run: |
+          # Commit frequency
+          git log --format="%ad" --date=short | sort | uniq -c > metrics/commit-frequency.txt
+          
+          # Contributors statistics
+          git shortlog -sn --all > metrics/contributors.txt
+          
+          # File change frequency
+          git log --format=format: --name-only | egrep -v '^$' | sort | uniq -c | sort -rg > metrics/file-changes.txt
+
+      - name: GitHub API metrics
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            // Repository stats
+            const repo = await github.rest.repos.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+            
+            // Issues metrics
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              per_page: 100
+            });
+            
+            // Pull requests metrics
+            const pulls = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              per_page: 100
+            });
+            
+            // Calculate metrics
+            const metrics = {
+              repository: {
+                stars: repo.data.stargazers_count,
+                forks: repo.data.forks_count,
+                watchers: repo.data.watchers_count,
+                open_issues: repo.data.open_issues_count,
+                size: repo.data.size
+              },
+              issues: {
+                total: issues.data.length,
+                open: issues.data.filter(i => i.state === 'open').length,
+                closed: issues.data.filter(i => i.state === 'closed').length,
+                avg_close_time: calculateAvgCloseTime(issues.data)
+              },
+              pull_requests: {
+                total: pulls.data.length,
+                open: pulls.data.filter(p => p.state === 'open').length,
+                merged: pulls.data.filter(p => p.merged_at).length,
+                avg_merge_time: calculateAvgMergeTime(pulls.data)
+              }
+            };
+            
+            fs.writeFileSync('metrics/github-metrics.json', JSON.stringify(metrics, null, 2));
+            
+            function calculateAvgCloseTime(issues) {
+              const closedIssues = issues.filter(i => i.closed_at);
+              if (closedIssues.length === 0) return 0;
+              
+              const totalTime = closedIssues.reduce((sum, issue) => {
+                const openTime = new Date(issue.created_at);
+                const closeTime = new Date(issue.closed_at);
+                return sum + (closeTime - openTime);
+              }, 0);
+              
+              return Math.round(totalTime / closedIssues.length / (1000 * 60 * 60 * 24)); // days
+            }
+            
+            function calculateAvgMergeTime(pulls) {
+              const mergedPulls = pulls.filter(p => p.merged_at);
+              if (mergedPulls.length === 0) return 0;
+              
+              const totalTime = mergedPulls.reduce((sum, pull) => {
+                const openTime = new Date(pull.created_at);
+                const mergeTime = new Date(pull.merged_at);
+                return sum + (mergeTime - openTime);
+              }, 0);
+              
+              return Math.round(totalTime / mergedPulls.length / (1000 * 60 * 60 * 24)); // days
+            }
+
+      - name: Code frequency analysis
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const codeFreq = await github.rest.repos.getCodeFrequencyStats({
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+            
+            require('fs').writeFileSync(
+              'metrics/code-frequency.json',
+              JSON.stringify(codeFreq.data, null, 2)
+            );
+
+  # Security Metrics
+  security-metrics:
+    name: Security Metrics
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Security scanning metrics
+        run: |
+          # OWASP dependency check
+          npx owasp-dependency-check --project "Financial Simulator" --scan . --format JSON --out metrics/owasp-report.json
+          
+          # License compliance
+          npx license-checker --json > metrics/licenses.json
+          
+          # Secrets scanning
+          npx trufflescan --json > metrics/secrets-scan.json || true
+
+      - name: Container scanning
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          format: 'json'
+          output: 'metrics/trivy-scan.json'
+
+  # Generate Dashboard
+  generate-dashboard:
+    name: Generate Metrics Dashboard
+    runs-on: ubuntu-latest
+    needs: [code-metrics, performance-metrics, repo-metrics, security-metrics]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all metrics
+        uses: actions/download-artifact@v3
+        with:
+          path: metrics-data
+
+      - name: Generate dashboard
+        run: |
+          npm ci
+          node scripts/generate-metrics-dashboard.js
+          
+          # Generate visualizations
+          npm run metrics:visualize
+
+      - name: Upload to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./metrics-dashboard
+          destination_dir: metrics
+
+      - name: Store metrics in database
+        env:
+          METRICS_DB_URL: ${{ secrets.METRICS_DB_URL }}
+        run: |
+          node scripts/store-metrics.js
+
+      - name: Send metrics report
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              text: "📊 Metrics Report Generated",
+              attachments: [{
+                color: 'good',
+                fields: [
+                  {
+                    title: 'Dashboard URL',
+                    value: 'https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/metrics',
+                    short: false
+                  },
+                  {
+                    title: 'Timestamp',
+                    value: '${{ github.event.head_commit.timestamp }}',
+                    short: true
+                  }
+                ]
+              }]
+            }
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}

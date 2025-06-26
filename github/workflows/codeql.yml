@@ -1,0 +1,382 @@
+name: CodeQL Analysis
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '30 1 * * 0'  # Weekly on Sunday at 1:30 AM
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  # Analyze Code
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ${{ (matrix.language == 'swift' && 'macos-latest') || 'ubuntu-latest' }}
+    timeout-minutes: ${{ (matrix.language == 'swift' && 120) || 360 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'javascript', 'python', 'typescript' ]
+        # Additional languages can be added: 'cpp', 'csharp', 'go', 'java', 'kotlin', 'ruby', 'swift'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          config-file: ./.github/codeql/codeql-config.yml
+          queries: +security-extended,security-and-quality
+          
+      - name: Setup build environment
+        if: matrix.language == 'javascript' || matrix.language == 'typescript'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+          cache: 'npm'
+
+      - name: Install dependencies
+        if: matrix.language == 'javascript' || matrix.language == 'typescript'
+        run: |
+          npm ci
+          npm run build --if-present
+
+      - name: Setup Python
+        if: matrix.language == 'python'
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        if: matrix.language == 'python'
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{matrix.language}}"
+          upload: true
+          add-snippet-context: true
+
+  # Custom Security Queries
+  custom-queries:
+    name: Custom Security Queries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL with custom queries
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript,python
+          config: |
+            name: "Custom security configuration"
+            queries:
+              - uses: security-extended
+              - uses: security-experimental
+              - uses: ./.github/codeql/custom-queries
+            paths-ignore:
+              - node_modules
+              - dist
+              - build
+              - "**/*.test.js"
+              - "**/*.spec.js"
+
+      - name: Build application
+        run: |
+          npm ci
+          npm run build
+
+      - name: Run analysis
+        uses: github/codeql-action/analyze@v3
+
+  # SARIF Processing
+  process-results:
+    name: Process SARIF Results
+    runs-on: ubuntu-latest
+    needs: [analyze, custom-queries]
+    if: always()
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download SARIF files
+        uses: actions/download-artifact@v3
+        with:
+          name: sarif-results
+          path: sarif-results
+
+      - name: Process SARIF files
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            // Read all SARIF files
+            const sarifDir = 'sarif-results';
+            const sarifFiles = fs.readdirSync(sarifDir)
+              .filter(file => file.endsWith('.sarif'));
+            
+            let totalAlerts = 0;
+            let criticalAlerts = 0;
+            let highAlerts = 0;
+            let mediumAlerts = 0;
+            let lowAlerts = 0;
+            
+            // Process each SARIF file
+            for (const file of sarifFiles) {
+              const sarif = JSON.parse(fs.readFileSync(path.join(sarifDir, file), 'utf8'));
+              
+              for (const run of sarif.runs) {
+                for (const result of run.results || []) {
+                  totalAlerts++;
+                  
+                  const level = result.level || 'warning';
+                  const severity = result.properties?.['security-severity'] || 
+                                 result.properties?.['problem.severity'] || 
+                                 'medium';
+                  
+                  switch (severity.toLowerCase()) {
+                    case 'critical':
+                    case 'error':
+                      criticalAlerts++;
+                      break;
+                    case 'high':
+                      highAlerts++;
+                      break;
+                    case 'medium':
+                    case 'warning':
+                      mediumAlerts++;
+                      break;
+                    case 'low':
+                    case 'note':
+                      lowAlerts++;
+                      break;
+                  }
+                }
+              }
+            }
+            
+            // Create summary
+            const summary = {
+              total: totalAlerts,
+              critical: criticalAlerts,
+              high: highAlerts,
+              medium: mediumAlerts,
+              low: lowAlerts,
+              timestamp: new Date().toISOString()
+            };
+            
+            // Write summary
+            fs.writeFileSync('codeql-summary.json', JSON.stringify(summary, null, 2));
+            
+            // Create markdown report
+            const report = `# CodeQL Security Analysis Report
+            
+            ## Summary
+            - **Total Alerts**: ${totalAlerts}
+            - **Critical**: ${criticalAlerts}
+            - **High**: ${highAlerts}
+            - **Medium**: ${mediumAlerts}
+            - **Low**: ${lowAlerts}
+            
+            Generated: ${summary.timestamp}
+            `;
+            
+            fs.writeFileSync('codeql-report.md', report);
+            
+            // Set output
+            core.setOutput('total_alerts', totalAlerts);
+            core.setOutput('critical_alerts', criticalAlerts);
+            core.setOutput('has_critical', criticalAlerts > 0);
+
+      - name: Upload analysis summary
+        uses: actions/upload-artifact@v3
+        with:
+          name: codeql-summary
+          path: |
+            codeql-summary.json
+            codeql-report.md
+
+  # Security Dashboard
+  security-dashboard:
+    name: Update Security Dashboard
+    runs-on: ubuntu-latest
+    needs: process-results
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download summary
+        uses: actions/download-artifact@v3
+        with:
+          name: codeql-summary
+          path: security-data
+
+      - name: Update dashboard data
+        run: |
+          # Create directory structure
+          mkdir -p data/security
+          
+          # Move current data to history
+          if [ -f data/security/current.json ]; then
+            timestamp=$(date +%Y%m%d_%H%M%S)
+            cp data/security/current.json data/security/history_${timestamp}.json
+          fi
+          
+          # Update current data
+          cp security-data/codeql-summary.json data/security/current.json
+          
+          # Generate trend data
+          node scripts/generate-security-trends.js || echo "No trends script found"
+
+      - name: Commit and push
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add data/security/
+          git commit -m "Update CodeQL security data" || echo "No changes to commit"
+          git push
+
+  # Alert on Critical Issues
+  alert-critical:
+    name: Alert Critical Issues
+    runs-on: ubuntu-latest
+    needs: process-results
+    if: needs.process-results.outputs.has_critical == 'true'
+    steps:
+      - name: Create issue for critical alerts
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 Critical Security Alerts Detected by CodeQL',
+              body: `CodeQL analysis has detected **${{ needs.process-results.outputs.critical_alerts }}** critical security alerts.
+              
+              **Total Alerts**: ${{ needs.process-results.outputs.total_alerts }}
+              
+              Please review the [Security tab](https://github.com/${{ github.repository }}/security/code-scanning) for detailed information.
+              
+              cc: @${{ github.repository_owner }}`,
+              labels: ['security', 'critical', 'codeql'],
+              assignees: [context.actor]
+            });
+            
+            console.log(`Created issue #${issue.data.number}`);
+
+      - name: Send emergency notification
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              text: "🚨 Critical Security Alert",
+              attachments: [{
+                color: 'danger',
+                fields: [
+                  {
+                    title: 'Repository',
+                    value: '${{ github.repository }}',
+                    short: true
+                  },
+                  {
+                    title: 'Critical Alerts',
+                    value: '${{ needs.process-results.outputs.critical_alerts }}',
+                    short: true
+                  },
+                  {
+                    title: 'Total Alerts',
+                    value: '${{ needs.process-results.outputs.total_alerts }}',
+                    short: true
+                  },
+                  {
+                    title: 'Action Required',
+                    value: 'Immediate review required',
+                    short: true
+                  }
+                ],
+                actions: [
+                  {
+                    type: 'button',
+                    text: 'View Security Alerts',
+                    url: 'https://github.com/${{ github.repository }}/security/code-scanning'
+                  }
+                ]
+              }]
+            }
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_CRITICAL }}
+
+  # Generate Security Report
+  generate-report:
+    name: Generate Security Report
+    runs-on: ubuntu-latest
+    needs: [analyze, process-results]
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install report dependencies
+        run: |
+          pip install jinja2 matplotlib pandas
+
+      - name: Generate comprehensive report
+        run: |
+          python scripts/generate-security-report.py \
+            --sarif-dir sarif-results \
+            --output-format html,pdf,json \
+            --include-trends \
+            --include-recommendations
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-reports
+          path: |
+            reports/security-report.html
+            reports/security-report.pdf
+            reports/security-report.json
+
+      - name: Send report email
+        if: github.event_name == 'schedule'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "Weekly CodeQL Security Report - ${{ github.repository }}"
+          to: ${{ secrets.SECURITY_EMAIL_LIST }}
+          from: GitHub Security <security@noreply.github.com>
+          html_body: file://reports/security-report.html
+          attachments: reports/security-report.pdf

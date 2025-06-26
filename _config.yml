@@ -1,0 +1,337 @@
+# GitHub Pages Configuration for Data Analytics Portfolio
+# This file configures Jekyll for GitHub Pages deployment
+
+# Site Settings
+title: Data Analytics Portfolio
+email: your.email@example.com
+description: >-
+  A comprehensive portfolio showcasing data analytics projects, machine learning models,
+  and business intelligence solutions. Featuring real-world applications of data science
+  methodologies to solve complex business problems.
+baseurl: "" # Leave empty if deploying to username.github.io
+url: "https://yourusername.github.io" # Your GitHub Pages URL
+twitter_username: yourtwitter
+github_username: yourgithub
+linkedin_username: yourlinkedin
+
+# Build Settings
+theme: minima # You can change to other GitHub Pages supported themes
+remote_theme: pages-themes/cayman@v0.2.0 # Alternative remote theme option
+
+# Plugins
+plugins:
+  - jekyll-feed
+  - jekyll-seo-tag
+  - jekyll-sitemap
+  - jekyll-paginate
+  - jekyll-redirect-from
+  - jekyll-github-metadata
+  - jekyll-mentions
+  - jemoji
+  - jekyll-include-cache
+  - jekyll-gist
+
+# Markdown Processing
+markdown: kramdown
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+  syntax_highlighter_opts:
+    css_class: 'highlight'
+    span:
+      line_numbers: false
+    block:
+      line_numbers: true
+      start_line: 1
+
+# Collections
+collections:
+  projects:
+    output: true
+    permalink: /projects/:name
+  notebooks:
+    output: true
+    permalink: /notebooks/:name
+  tutorials:
+    output: true
+    permalink: /tutorials/:name
+
+# Defaults
+defaults:
+  - scope:
+      path: ""
+      type: "projects"
+    values:
+      layout: "project"
+      author: "Your Name"
+  - scope:
+      path: ""
+      type: "notebooks"
+    values:
+      layout: "notebook"
+      toc: true
+  - scope:
+      path: ""
+      type: "posts"
+    values:
+      layout: "post"
+      comments: true
+      share: true
+
+# Pagination
+paginate: 10
+paginate_path: "/blog/page:num/"
+
+# SEO and Analytics
+google_analytics: UA-XXXXXXXXX-X # Your Google Analytics tracking ID
+google_site_verification: # Your Google site verification token
+bing_site_verification: # Your Bing site verification token
+
+# Social Media
+social:
+  name: Your Name
+  links:
+    - https://twitter.com/yourtwitter
+    - https://github.com/yourgithub
+    - https://linkedin.com/in/yourlinkedin
+    - https://medium.com/@yourmedium
+    - https://kaggle.com/yourkaggle
+
+# Disqus Comments (optional)
+disqus:
+  shortname: your-disqus-shortname
+
+# Navigation Menu
+navigation:
+  - title: Home
+    url: /
+  - title: Projects
+    url: /projects/
+  - title: Notebooks
+    url: /notebooks/
+  - title: Blog
+    url: /blog/
+  - title: About
+    url: /about/
+  - title: Resume
+    url: /resume/
+
+# Exclude from Jekyll build
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - node_modules/
+  - vendor/
+  - .sass-cache/
+  - .jekyll-cache/
+  - .jekyll-metadata
+  - .git/
+  - .gitignore
+  - README.md
+  - LICENSE
+  - CHANGELOG.md
+  - package.json
+  - package-lock.json
+  - docker-compose.yml
+  - docker-compose.prod.yml
+  - Dockerfile*
+  - requirements*.txt
+  - tests/
+  - scripts/
+  - data/raw/
+  - data/processed/
+  - models/*.pkl
+  - models/*.h5
+  - "*.pyc"
+  - "__pycache__"
+  - .env
+  - .venv/
+  - env/
+  - venv/
+  - .pytest_cache/
+  - .coverage
+  - htmlcov/
+  - .mypy_cache/
+  - .tox/
+  - mlruns/
+  - logs/
+  - "*.log"
+
+# Include specific files
+include:
+  - _pages
+  - .htaccess
+  - _redirects
+  - robots.txt
+
+# Reading Files
+keep_files:
+  - .git
+  - .github
+  - images
+  - files
+  - downloads
+
+# Compression
+sass:
+  style: compressed
+
+# HTML Compression
+compress_html:
+  clippings: all
+  ignore:
+    envs: development
+
+# Archives
+category_archive:
+  type: liquid
+  path: /categories/
+tag_archive:
+  type: liquid
+  path: /tags/
+
+# Jekyll Compose defaults
+jekyll_compose:
+  default_front_matter:
+    posts:
+      description:
+      image:
+      category:
+      tags:
+      published: false
+      sitemap: false
+
+# Build settings for GitHub Pages
+lsi: false
+safe: true
+incremental: false
+highlighter: rouge
+gist:
+  noscript: false
+
+# GitHub Repository Settings
+repository: yourusername/data-analytics-portfolio
+github: [metadata]
+
+# Additional SEO settings
+lang: en_US
+logo: /assets/images/logo.png
+image: /assets/images/portfolio-preview.png
+author:
+  name: Your Name
+  email: your.email@example.com
+  bio: "Data Scientist | Machine Learning Engineer | Business Intelligence Analyst"
+  avatar: /assets/images/avatar.jpg
+  location: "Your City, Country"
+  employer: "Your Company"
+  github: yourgithub
+  linkedin: yourlinkedin
+  twitter: yourtwitter
+
+# Open Graph default image
+og_image: /assets/images/portfolio-og.png
+
+# Timezone
+timezone: America/New_York
+
+# Reading time
+reading_time: true
+words_per_minute: 200
+
+# Enable MathJax for mathematical expressions
+mathjax: true
+
+# Enable syntax highlighting theme
+syntax_highlighter_theme: monokai
+
+# Project categories for filtering
+project_categories:
+  - machine-learning
+  - data-visualization
+  - business-intelligence
+  - deep-learning
+  - time-series
+  - nlp
+  - computer-vision
+  - big-data
+
+# Skills to highlight
+skills:
+  - Python
+  - R
+  - SQL
+  - Machine Learning
+  - Deep Learning
+  - Data Visualization
+  - Statistical Analysis
+  - Big Data
+  - Cloud Computing
+  - Business Intelligence
+
+# External links
+external_links:
+  resume_pdf: /assets/files/resume.pdf
+  kaggle_profile: https://kaggle.com/yourkaggle
+  tableau_public: https://public.tableau.com/profile/yourprofile
+  medium_blog: https://medium.com/@yourmedium
+
+# Custom variables
+show_downloads: true
+show_excerpts: true
+enable_copy_code_button: true
+enable_featured_projects: true
+featured_project_limit: 3
+
+# Footer settings
+footer_links:
+  - title: GitHub
+    url: https://github.com/yourgithub
+    icon: fab fa-github
+  - title: LinkedIn
+    url: https://linkedin.com/in/yourlinkedin
+    icon: fab fa-linkedin
+  - title: Email
+    url: mailto:your.email@example.com
+    icon: fas fa-envelope
+
+# Copyright
+copyright: "© 2025 Your Name. All rights reserved."
+
+# Google Fonts
+google_fonts:
+  - name: "Source Sans Pro"
+    weights: "400,400i,700,700i"
+  - name: "Source Code Pro"
+    weights: "400,700"
+
+# PWA settings (Progressive Web App)
+pwa:
+  sw_src_filepath: service-worker.js
+  sw_dest_filename: service-worker.js
+  dest_js_directory: assets/js
+  precache_recent_posts_num: 5
+  precache_glob_directory: /
+  precache_glob_patterns:
+    - "{js,css,fonts}/**/*.{js,css,eot,svg,ttf,woff}"
+    - index.html
+  precache_glob_ignores:
+    - sw-register.js
+    - "fonts/**/*"
+
+# Jekyll Archives
+jekyll-archives:
+  enabled:
+    - categories
+    - tags
+    - year
+    - month
+  layouts:
+    category: category
+    tag: tag
+    year: archive-year
+    month: archive-month
+  permalinks:
+    category: /categories/:name/
+    tag: /tags/:name/
+    year: /:year/
+    month: /:year/:month/

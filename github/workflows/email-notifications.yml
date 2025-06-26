@@ -1,0 +1,427 @@
+name: Email Notifications & Reports
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'      # Weekly report - Monday 9 AM
+    - cron: '0 9 1 * *'      # Monthly report - 1st day of month 9 AM
+    - cron: '0 18 * * 1-5'   # Daily summary - Weekdays 6 PM
+  workflow_dispatch:
+    inputs:
+      report_type:
+        description: 'Type of report to generate'
+        required: true
+        type: choice
+        options:
+          - daily
+          - weekly
+          - monthly
+          - custom
+          - incident
+      recipients:
+        description: 'Additional recipients (comma-separated emails)'
+        required: false
+        type: string
+  workflow_run:
+    workflows: ["CI/CD Pipeline", "Security Scanning", "Release Management"]
+    types:
+      - completed
+
+permissions:
+  contents: read
+  actions: read
+  issues: read
+  pull-requests: read
+  discussions: read
+
+jobs:
+  # Determine Report Type
+  determine-report:
+    name: Determine Report Type
+    runs-on: ubuntu-latest
+    outputs:
+      report_type: ${{ steps.determine.outputs.report_type }}
+      recipients: ${{ steps.determine.outputs.recipients }}
+      period_start: ${{ steps.determine.outputs.period_start }}
+      period_end: ${{ steps.determine.outputs.period_end }}
+    steps:
+      - name: Determine report parameters
+        id: determine
+        run: |
+          # Default recipients
+          RECIPIENTS="${{ secrets.EMAIL_REPORT_LIST }}"
+          
+          # Add custom recipients if provided
+          if [ -n "${{ github.event.inputs.recipients }}" ]; then
+            RECIPIENTS="$RECIPIENTS,${{ github.event.inputs.recipients }}"
+          fi
+          
+          # Determine report type
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            REPORT_TYPE="${{ github.event.inputs.report_type }}"
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            REPORT_TYPE="workflow"
+          else
+            # Scheduled reports
+            HOUR=$(date +%H)
+            DAY=$(date +%d)
+            DOW=$(date +%u)
+            
+            if [ "$HOUR" = "18" ]; then
+              REPORT_TYPE="daily"
+            elif [ "$DOW" = "1" ] && [ "$HOUR" = "09" ]; then
+              REPORT_TYPE="weekly"
+            elif [ "$DAY" = "01" ] && [ "$HOUR" = "09" ]; then
+              REPORT_TYPE="monthly"
+            else
+              REPORT_TYPE="custom"
+            fi
+          fi
+          
+          # Calculate date ranges
+          case "$REPORT_TYPE" in
+            daily)
+              PERIOD_START=$(date -d "yesterday" +%Y-%m-%d)
+              PERIOD_END=$(date +%Y-%m-%d)
+              ;;
+            weekly)
+              PERIOD_START=$(date -d "last monday" +%Y-%m-%d)
+              PERIOD_END=$(date +%Y-%m-%d)
+              ;;
+            monthly)
+              PERIOD_START=$(date -d "first day of last month" +%Y-%m-%d)
+              PERIOD_END=$(date -d "last day of last month" +%Y-%m-%d)
+              ;;
+            *)
+              PERIOD_START=$(date -d "7 days ago" +%Y-%m-%d)
+              PERIOD_END=$(date +%Y-%m-%d)
+              ;;
+          esac
+          
+          echo "report_type=$REPORT_TYPE" >> $GITHUB_OUTPUT
+          echo "recipients=$RECIPIENTS" >> $GITHUB_OUTPUT
+          echo "period_start=$PERIOD_START" >> $GITHUB_OUTPUT
+          echo "period_end=$PERIOD_END" >> $GITHUB_OUTPUT
+
+  # Collect Metrics
+  collect-metrics:
+    name: Collect Metrics Data
+    runs-on: ubuntu-latest
+    needs: determine-report
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install pandas matplotlib seaborn jinja2 pdfkit requests
+
+      - name: Collect repository metrics
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const startDate = '${{ needs.determine-report.outputs.period_start }}';
+            const endDate = '${{ needs.determine-report.outputs.period_end }}';
+            
+            // Commits
+            const commits = await github.paginate(github.rest.repos.listCommits, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              since: startDate,
+              until: endDate,
+              per_page: 100
+            });
+            
+            // Issues
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              since: startDate,
+              per_page: 100
+            });
+            
+            // Pull Requests
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              sort: 'created',
+              direction: 'desc',
+              per_page: 100
+            });
+            
+            // Workflow runs
+            const workflows = await github.rest.actions.listWorkflowRunsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              created: `${startDate}..${endDate}`,
+              per_page: 100
+            });
+            
+            // Process and save data
+            const metrics = {
+              period: {
+                start: startDate,
+                end: endDate,
+                type: '${{ needs.determine-report.outputs.report_type }}'
+              },
+              commits: {
+                total: commits.length,
+                authors: [...new Set(commits.map(c => c.author?.login || 'unknown'))],
+                daily_average: commits.length / ((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24))
+              },
+              issues: {
+                opened: issues.filter(i => new Date(i.created_at) >= new Date(startDate)).length,
+                closed: issues.filter(i => i.closed_at && new Date(i.closed_at) >= new Date(startDate)).length,
+                total_open: issues.filter(i => i.state === 'open').length
+              },
+              pull_requests: {
+                opened: pulls.filter(p => new Date(p.created_at) >= new Date(startDate)).length,
+                merged: pulls.filter(p => p.merged_at && new Date(p.merged_at) >= new Date(startDate)).length,
+                total_open: pulls.filter(p => p.state === 'open').length
+              },
+              workflows: {
+                total_runs: workflows.data.workflow_runs.length,
+                successful: workflows.data.workflow_runs.filter(w => w.conclusion === 'success').length,
+                failed: workflows.data.workflow_runs.filter(w => w.conclusion === 'failure').length,
+                success_rate: workflows.data.workflow_runs.length > 0 
+                  ? (workflows.data.workflow_runs.filter(w => w.conclusion === 'success').length / workflows.data.workflow_runs.length * 100).toFixed(2) 
+                  : 0
+              }
+            };
+            
+            fs.writeFileSync('metrics.json', JSON.stringify(metrics, null, 2));
+
+      - name: Generate visualizations
+        run: |
+          python scripts/generate-email-charts.py \
+            --metrics metrics.json \
+            --output-dir charts/
+
+      - name: Upload metrics artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: email-metrics
+          path: |
+            metrics.json
+            charts/
+
+  # Generate Report
+  generate-report:
+    name: Generate Email Report
+    runs-on: ubuntu-latest
+    needs: [determine-report, collect-metrics]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download metrics
+        uses: actions/download-artifact@v3
+        with:
+          name: email-metrics
+          path: report-data/
+
+      - name: Setup report environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wkhtmltopdf
+          pip install jinja2 pdfkit premailer beautifulsoup4
+
+      - name: Generate HTML report
+        run: |
+          # Create report template
+          cat > report-template.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <meta charset="UTF-8">
+              <style>
+                  body {
+                      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                      line-height: 1.6;
+                      color: #333;
+                      max-width: 800px;
+                      margin: 0 auto;
+                      padding: 20px;
+                      background-color: #f5f5f5;
+                  }
+                  .container {
+                      background-color: white;
+                      padding: 30px;
+                      border-radius: 10px;
+                      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                  }
+                  h1 {
+                      color: #2c3e50;
+                      border-bottom: 3px solid #3498db;
+                      padding-bottom: 10px;
+                  }
+                  h2 {
+                      color: #34495e;
+                      margin-top: 30px;
+                  }
+                  .metric-grid {
+                      display: grid;
+                      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                      gap: 20px;
+                      margin: 20px 0;
+                  }
+                  .metric-card {
+                      background: #f8f9fa;
+                      padding: 20px;
+                      border-radius: 8px;
+                      text-align: center;
+                      border: 1px solid #e9ecef;
+                  }
+                  .metric-value {
+                      font-size: 36px;
+                      font-weight: bold;
+                      color: #2c3e50;
+                  }
+                  .metric-label {
+                      color: #7f8c8d;
+                      font-size: 14px;
+                      text-transform: uppercase;
+                      letter-spacing: 1px;
+                  }
+                  .chart {
+                      margin: 20px 0;
+                      text-align: center;
+                  }
+                  .chart img {
+                      max-width: 100%;
+                      height: auto;
+                      border-radius: 8px;
+                  }
+                  .success { color: #27ae60; }
+                  .warning { color: #f39c12; }
+                  .danger { color: #e74c3c; }
+                  .footer {
+                      margin-top: 40px;
+                      padding-top: 20px;
+                      border-top: 1px solid #e9ecef;
+                      text-align: center;
+                      color: #7f8c8d;
+                      font-size: 12px;
+                  }
+                  table {
+                      width: 100%;
+                      border-collapse: collapse;
+                      margin: 20px 0;
+                  }
+                  th, td {
+                      padding: 12px;
+                      text-align: left;
+                      border-bottom: 1px solid #e9ecef;
+                  }
+                  th {
+                      background-color: #f8f9fa;
+                      font-weight: 600;
+                      color: #2c3e50;
+                  }
+                  .badge {
+                      display: inline-block;
+                      padding: 4px 8px;
+                      border-radius: 4px;
+                      font-size: 12px;
+                      font-weight: 600;
+                  }
+                  .badge-success { background-color: #d4edda; color: #155724; }
+                  .badge-warning { background-color: #fff3cd; color: #856404; }
+                  .badge-danger { background-color: #f8d7da; color: #721c24; }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <h1>{{ report_type|title }} Development Report</h1>
+                  <p><strong>Period:</strong> {{ period_start }} to {{ period_end }}</p>
+                  <p><strong>Repository:</strong> {{ repository }}</p>
+                  
+                  <h2>Executive Summary</h2>
+                  <div class="metric-grid">
+                      <div class="metric-card">
+                          <div class="metric-value">{{ metrics.commits.total }}</div>
+                          <div class="metric-label">Commits</div>
+                      </div>
+                      <div class="metric-card">
+                          <div class="metric-value">{{ metrics.issues.opened }}</div>
+                          <div class="metric-label">Issues Opened</div>
+                      </div>
+                      <div class="metric-card">
+                          <div class="metric-value">{{ metrics.pull_requests.merged }}</div>
+                          <div class="metric-label">PRs Merged</div>
+                      </div>
+                      <div class="metric-card">
+                          <div class="metric-value {{ 'success' if metrics.workflows.success_rate|float > 90 else 'warning' }}">
+                              {{ metrics.workflows.success_rate }}%
+                          </div>
+                          <div class="metric-label">Build Success Rate</div>
+                      </div>
+                  </div>
+                  
+                  <h2>Development Activity</h2>
+                  <div class="chart">
+                      <img src="cid:commits_chart" alt="Commits Chart">
+                  </div>
+                  
+                  <h2>Issue Management</h2>
+                  <table>
+                      <tr>
+                          <th>Metric</th>
+                          <th>Value</th>
+                          <th>Status</th>
+                      </tr>
+                      <tr>
+                          <td>Issues Opened</td>
+                          <td>{{ metrics.issues.opened }}</td>
+                          <td><span class="badge badge-info">{{ metrics.issues.opened }}</span></td>
+                      </tr>
+                      <tr>
+                          <td>Issues Closed</td>
+                          <td>{{ metrics.issues.closed }}</td>
+                          <td><span class="badge badge-success">{{ metrics.issues.closed }}</span></td>
+                      </tr>
+                      <tr>
+                          <td>Open Issues</td>
+                          <td>{{ metrics.issues.total_open }}</td>
+                          <td><span class="badge {{ 'badge-warning' if metrics.issues.total_open > 50 else 'badge-success' }}">{{ metrics.issues.total_open }}</span></td>
+                      </tr>
+                  </table>
+                  
+                  <h2>CI/CD Performance</h2>
+                  <div class="chart">
+                      <img src="cid:pipeline_chart" alt="Pipeline Success Chart">
+                  </div>
+                  
+                  <h2>Top Contributors</h2>
+                  <table>
+                      <tr>
+                          <th>Developer</th>
+                          <th>Commits</th>
+                      </tr>
+                      {% for author in metrics.commits.authors[:5] %}
+                      <tr>
+                          <td>{{ author }}</td>
+                          <td>-</td>
+                      </tr>
+                      {% endfor %}
+                  </table>
+                  
+                  <div class="footer">
+                      <p>This is an automated report generated by GitHub Actions</p>
+                      <p>For detailed metrics, visit the <a href="{{ dashboard_url }}">project dashboard</a></p>
+                  </div>
+              </div>
+          </body>
+          </html>
+          EOF
+          
+          # Generate report using template
+          python scripts/generate-email-report.py \
+            -

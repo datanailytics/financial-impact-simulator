@@ -1,0 +1,219 @@
+# Jupyter-optimized Dockerfile for Data Analytics Portfolio
+# Based on official Jupyter Docker Stacks with additional data science tools
+
+FROM jupyter/datascience-notebook:latest
+
+# Switch to root for installation
+USER root
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive \
+    JUPYTER_ENABLE_LAB=yes \
+    GRANT_SUDO=yes
+
+# Install additional system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Database drivers
+    postgresql-client \
+    libpq-dev \
+    default-mysql-client \
+    libmysqlclient-dev \
+    unixodbc-dev \
+    # Graphics and visualization
+    graphviz \
+    ffmpeg \
+    imagemagick \
+    # Geospatial libraries
+    gdal-bin \
+    libgdal-dev \
+    libgeos-dev \
+    libproj-dev \
+    # Additional utilities
+    htop \
+    tree \
+    tmux \
+    ssh \
+    rsync \
+    zip \
+    unzip \
+    p7zip-full \
+    # LaTeX for PDF generation
+    texlive-xetex \
+    texlive-fonts-recommended \
+    texlive-plain-generic \
+    pandoc \
+    # Development tools
+    build-essential \
+    cmake \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install additional Python packages for data science
+RUN pip install --no-cache-dir \
+    # Enhanced Jupyter functionality
+    jupyterlab>=4.0.0 \
+    jupyterlab-git \
+    jupyterlab-lsp \
+    jupyterlab-code-formatter \
+    jupyterlab-execute-time \
+    jupyterlab-spellchecker \
+    jupyterlab-variableinspector \
+    jupyterlab-system-monitor \
+    jupyterlab-topbar \
+    jupyterlab-spreadsheet \
+    jupytext \
+    nbdime \
+    # Data manipulation and analysis
+    pandas>=2.0.0 \
+    numpy>=1.24.0 \
+    scipy>=1.10.0 \
+    dask[complete] \
+    vaex \
+    modin[all] \
+    # Visualization
+    matplotlib>=3.7.0 \
+    seaborn>=0.12.0 \
+    plotly>=5.14.0 \
+    bokeh>=3.1.0 \
+    altair>=5.0.0 \
+    holoviews \
+    datashader \
+    panel \
+    dash \
+    streamlit \
+    # Machine Learning
+    scikit-learn>=1.3.0 \
+    xgboost>=1.7.0 \
+    lightgbm>=4.0.0 \
+    catboost>=1.2.0 \
+    prophet \
+    pmdarima \
+    # Deep Learning
+    tensorflow>=2.13.0 \
+    keras>=2.13.0 \
+    torch>=2.0.0 \
+    torchvision \
+    transformers \
+    # Natural Language Processing
+    nltk \
+    spacy \
+    gensim \
+    textblob \
+    # Statistical modeling
+    statsmodels>=0.14.0 \
+    pymc>=5.0.0 \
+    arviz \
+    # Database connectivity
+    sqlalchemy>=2.0.0 \
+    psycopg2-binary \
+    pymongo \
+    redis \
+    # Cloud SDKs
+    boto3 \
+    google-cloud-storage \
+    azure-storage-blob \
+    # Geospatial analysis
+    geopandas \
+    folium \
+    shapely \
+    rasterio \
+    # Time series
+    tsfresh \
+    sktime \
+    # Model interpretation
+    shap \
+    lime \
+    eli5 \
+    # Experiment tracking
+    mlflow \
+    wandb \
+    neptune-client \
+    # Data validation
+    great-expectations \
+    pandera \
+    # Web scraping
+    beautifulsoup4 \
+    scrapy \
+    selenium \
+    # API clients
+    requests \
+    httpx \
+    # Utilities
+    tqdm \
+    click \
+    python-dotenv \
+    pyyaml \
+    # Code quality
+    black[jupyter] \
+    isort \
+    autopep8
+
+# Install R packages for data science
+RUN R -e "install.packages(c('tidyverse', 'caret', 'randomForest', 'xgboost', 'prophet', 'forecast', 'ggplot2', 'plotly', 'shiny', 'rmarkdown', 'knitr', 'devtools'), repos='https://cloud.r-project.org/')"
+
+# Install Julia packages
+RUN julia -e 'using Pkg; Pkg.add(["DataFrames", "CSV", "Plots", "StatsPlots", "MLJ", "Flux", "DifferentialEquations", "JuMP", "Pluto"])'
+
+# Configure Jupyter Lab extensions
+RUN jupyter labextension install @jupyter-widgets/jupyterlab-manager \
+                                @jupyterlab/toc \
+                                @jupyterlab/google-drive \
+                                @jupyterlab/github \
+                                jupyterlab-plotly \
+                                @bokeh/jupyter_bokeh
+
+# Enable server extensions
+RUN jupyter serverextension enable --py jupyterlab_git --sys-prefix && \
+    jupyter serverextension enable --py jupyterlab_lsp --sys-prefix && \
+    jupyter nbextension enable --py widgetsnbextension --sys-prefix && \
+    jupyter labextension enable @jupyter-widgets/jupyterlab-manager
+
+# Configure nbdime for better git integration
+RUN nbdime config-git --enable --global
+
+# Create custom Jupyter configuration
+RUN mkdir -p /etc/jupyter && \
+    echo "c.ServerApp.ip = '0.0.0.0'" >> /etc/jupyter/jupyter_lab_config.py && \
+    echo "c.ServerApp.allow_root = True" >> /etc/jupyter/jupyter_lab_config.py && \
+    echo "c.ServerApp.open_browser = False" >> /etc/jupyter/jupyter_lab_config.py && \
+    echo "c.ServerApp.terminado_settings = {'shell_command': ['/bin/bash']}" >> /etc/jupyter/jupyter_lab_config.py && \
+    echo "c.FileContentsManager.delete_to_trash = False" >> /etc/jupyter/jupyter_lab_config.py
+
+# Create workspace directory structure
+RUN mkdir -p /home/jovyan/work/{notebooks,data,models,outputs,scripts,reports} && \
+    chown -R ${NB_UID}:${NB_GID} /home/jovyan/work
+
+# Copy example notebooks if they exist
+COPY --chown=${NB_UID}:${NB_GID} notebooks/*.ipynb /home/jovyan/work/notebooks/ 2>/dev/null || :
+
+# Install code-server for VS Code in browser (optional)
+RUN curl -fsSL https://code-server.dev/install.sh | sh
+
+# Set up workspace settings for better development experience
+RUN mkdir -p /home/jovyan/.local/share/code-server/User && \
+    echo '{"workbench.colorTheme": "Default Dark+", "python.linting.enabled": true, "python.linting.pylintEnabled": true}' > /home/jovyan/.local/share/code-server/User/settings.json && \
+    chown -R ${NB_UID}:${NB_GID} /home/jovyan/.local
+
+# Switch back to jovyan user
+USER ${NB_UID}
+
+# Set working directory
+WORKDIR /home/jovyan/work
+
+# Expose ports
+EXPOSE 8888 8080 8787 8686
+
+# Start script that can launch multiple services
+RUN echo '#!/bin/bash\n\
+if [ "$ENABLE_CODE_SERVER" = "true" ]; then\n\
+    code-server --bind-addr 0.0.0.0:8080 --auth none &\n\
+fi\n\
+exec jupyter lab --NotebookApp.token="" --NotebookApp.password="" "$@"' > /home/jovyan/start.sh && \
+    chmod +x /home/jovyan/start.sh
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD wget -q --spider http://localhost:8888/lab || exit 1
+
+# Default command
+CMD ["/home/jovyan/start.sh"]

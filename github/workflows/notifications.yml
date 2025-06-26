@@ -1,0 +1,394 @@
+name: Notification System
+
+on:
+  workflow_run:
+    workflows: ["*"]
+    types:
+      - completed
+      - requested
+  issues:
+    types: [opened, closed, reopened, assigned, unassigned, labeled]
+  pull_request:
+    types: [opened, closed, reopened, ready_for_review, review_requested]
+  release:
+    types: [published, prereleased]
+  discussion:
+    types: [created, answered]
+  workflow_dispatch:
+    inputs:
+      notification_type:
+        description: 'Type of notification to send'
+        required: true
+        type: choice
+        options:
+          - test
+          - announcement
+          - maintenance
+          - incident
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  discussions: read
+
+jobs:
+  # Process Event
+  process-event:
+    name: Process Event
+    runs-on: ubuntu-latest
+    outputs:
+      event_type: ${{ steps.determine.outputs.event_type }}
+      priority: ${{ steps.determine.outputs.priority }}
+      channels: ${{ steps.determine.outputs.channels }}
+      message: ${{ steps.determine.outputs.message }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine event details
+        id: determine
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const eventName = context.eventName;
+            const action = context.payload.action;
+            let eventType, priority, channels, message;
+            
+            // Determine event type and priority
+            switch (eventName) {
+              case 'workflow_run':
+                eventType = 'workflow';
+                priority = context.payload.workflow_run.conclusion === 'failure' ? 'high' : 'low';
+                channels = ['slack', 'discord'];
+                message = `Workflow ${context.payload.workflow_run.name} ${context.payload.workflow_run.conclusion}`;
+                break;
+                
+              case 'issues':
+                eventType = 'issue';
+                priority = action === 'opened' ? 'medium' : 'low';
+                channels = ['slack', 'email'];
+                message = `Issue ${action}: ${context.payload.issue.title}`;
+                break;
+                
+              case 'pull_request':
+                eventType = 'pr';
+                priority = action === 'opened' || action === 'ready_for_review' ? 'medium' : 'low';
+                channels = ['slack', 'discord'];
+                message = `PR ${action}: ${context.payload.pull_request.title}`;
+                break;
+                
+              case 'release':
+                eventType = 'release';
+                priority = 'high';
+                channels = ['slack', 'discord', 'email', 'webhook'];
+                message = `New release published: ${context.payload.release.tag_name}`;
+                break;
+                
+              case 'workflow_dispatch':
+                eventType = 'manual';
+                priority = 'medium';
+                channels = ['slack', 'discord', 'email'];
+                message = `Manual notification: ${context.payload.inputs.notification_type}`;
+                break;
+                
+              default:
+                eventType = 'other';
+                priority = 'low';
+                channels = ['slack'];
+                message = `Event: ${eventName} ${action || ''}`;
+            }
+            
+            // Set outputs
+            core.setOutput('event_type', eventType);
+            core.setOutput('priority', priority);
+            core.setOutput('channels', JSON.stringify(channels));
+            core.setOutput('message', message);
+
+  # Slack Notifications
+  slack-notification:
+    name: Slack Notification
+    runs-on: ubuntu-latest
+    needs: process-event
+    if: contains(fromJson(needs.process-event.outputs.channels), 'slack')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Slack message
+        id: slack-message
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const priority = '${{ needs.process-event.outputs.priority }}';
+            const eventType = '${{ needs.process-event.outputs.event_type }}';
+            const message = '${{ needs.process-event.outputs.message }}';
+            
+            // Color based on priority
+            const colors = {
+              high: '#ff0000',
+              medium: '#ffaa00',
+              low: '#00ff00'
+            };
+            
+            // Icons based on event type
+            const icons = {
+              workflow: '⚙️',
+              issue: '🐛',
+              pr: '🔀',
+              release: '🚀',
+              manual: '📢',
+              other: '📌'
+            };
+            
+            const payload = {
+              text: `${icons[eventType]} ${message}`,
+              attachments: [{
+                color: colors[priority],
+                fields: [
+                  {
+                    title: 'Repository',
+                    value: `<https://github.com/${context.repo.owner}/${context.repo.repo}|${context.repo.repo}>`,
+                    short: true
+                  },
+                  {
+                    title: 'Actor',
+                    value: context.actor,
+                    short: true
+                  },
+                  {
+                    title: 'Branch',
+                    value: context.ref.replace('refs/heads/', ''),
+                    short: true
+                  },
+                  {
+                    title: 'Commit',
+                    value: `<https://github.com/${context.repo.owner}/${context.repo.repo}/commit/${context.sha}|${context.sha.substring(0, 7)}>`,
+                    short: true
+                  }
+                ],
+                footer: 'GitHub Actions',
+                footer_icon: 'https://github.githubassets.com/favicon.ico',
+                ts: Math.floor(Date.now() / 1000)
+              }]
+            };
+            
+            core.setOutput('payload', JSON.stringify(payload));
+
+      - name: Send to Slack
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: ${{ steps.slack-message.outputs.payload }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+
+  # Discord Notifications
+  discord-notification:
+    name: Discord Notification
+    runs-on: ubuntu-latest
+    needs: process-event
+    if: contains(fromJson(needs.process-event.outputs.channels), 'discord')
+    steps:
+      - name: Send Discord notification
+        uses: tsickert/discord-webhook@v5.3.0
+        with:
+          webhook-url: ${{ secrets.DISCORD_WEBHOOK }}
+          username: GitHub Actions
+          avatar-url: https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png
+          embed-title: ${{ needs.process-event.outputs.message }}
+          embed-color: ${{ needs.process-event.outputs.priority == 'high' && 16711680 || needs.process-event.outputs.priority == 'medium' && 16755200 || 65280 }}
+          embed-description: |
+            **Repository:** [${{ github.repository }}](https://github.com/${{ github.repository }})
+            **Actor:** ${{ github.actor }}
+            **Event:** ${{ github.event_name }}
+            **Commit:** [`${{ github.sha }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
+
+  # Email Notifications
+  email-notification:
+    name: Email Notification
+    runs-on: ubuntu-latest
+    needs: process-event
+    if: contains(fromJson(needs.process-event.outputs.channels), 'email')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Generate email content
+        id: email-content
+        run: |
+          cat > email.html << EOF
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <style>
+              body { font-family: Arial, sans-serif; }
+              .header { background-color: #f0f0f0; padding: 20px; }
+              .content { padding: 20px; }
+              .footer { background-color: #f0f0f0; padding: 10px; text-align: center; font-size: 12px; }
+              .priority-high { color: #ff0000; }
+              .priority-medium { color: #ffaa00; }
+              .priority-low { color: #00ff00; }
+            </style>
+          </head>
+          <body>
+            <div class="header">
+              <h2>GitHub Notification</h2>
+              <p class="priority-${{ needs.process-event.outputs.priority }}">
+                Priority: ${{ needs.process-event.outputs.priority }}
+              </p>
+            </div>
+            <div class="content">
+              <h3>${{ needs.process-event.outputs.message }}</h3>
+              <ul>
+                <li><strong>Repository:</strong> ${{ github.repository }}</li>
+                <li><strong>Actor:</strong> ${{ github.actor }}</li>
+                <li><strong>Event:</strong> ${{ github.event_name }}</li>
+                <li><strong>Commit:</strong> ${{ github.sha }}</li>
+                <li><strong>Time:</strong> ${{ github.event.head_commit.timestamp }}</li>
+              </ul>
+              <p>
+                <a href="https://github.com/${{ github.repository }}">View Repository</a> |
+                <a href="https://github.com/${{ github.repository }}/commit/${{ github.sha }}">View Commit</a>
+              </p>
+            </div>
+            <div class="footer">
+              <p>This is an automated notification from GitHub Actions</p>
+            </div>
+          </body>
+          </html>
+          EOF
+
+      - name: Send email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "[${{ needs.process-event.outputs.priority }}] ${{ needs.process-event.outputs.message }}"
+          to: ${{ secrets.EMAIL_RECIPIENTS }}
+          from: GitHub Actions <noreply@github.com>
+          html_body: file://email.html
+
+  # Webhook Notifications
+  webhook-notification:
+    name: Webhook Notification
+    runs-on: ubuntu-latest
+    needs: process-event
+    if: contains(fromJson(needs.process-event.outputs.channels), 'webhook')
+    steps:
+      - name: Send webhook
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const axios = require('axios');
+            
+            const payload = {
+              event: '${{ github.event_name }}',
+              action: '${{ github.event.action }}',
+              repository: context.repo,
+              actor: context.actor,
+              message: '${{ needs.process-event.outputs.message }}',
+              priority: '${{ needs.process-event.outputs.priority }}',
+              timestamp: new Date().toISOString(),
+              commit: context.sha,
+              ref: context.ref,
+              workflow: context.workflow,
+              run_id: context.runId,
+              run_number: context.runNumber
+            };
+            
+            // Send to multiple webhook endpoints
+            const webhooks = [
+              '${{ secrets.WEBHOOK_URL_1 }}',
+              '${{ secrets.WEBHOOK_URL_2 }}'
+            ].filter(url => url);
+            
+            for (const webhook of webhooks) {
+              try {
+                await axios.post(webhook, payload, {
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'X-GitHub-Event': '${{ github.event_name }}',
+                    'X-GitHub-Delivery': context.runId
+                  }
+                });
+                console.log(`✓ Webhook sent to ${webhook}`);
+              } catch (error) {
+                console.error(`✗ Failed to send webhook to ${webhook}:`, error.message);
+              }
+            }
+
+  # MS Teams Notification
+  teams-notification:
+    name: MS Teams Notification
+    runs-on: ubuntu-latest
+    needs: process-event
+    if: ${{ needs.process-event.outputs.priority == 'high' }}
+    steps:
+      - name: Send Teams notification
+        uses: jdcargile/ms-teams-notification@v1.4
+        with:
+          github-token: ${{ github.token }}
+          ms-teams-webhook-uri: ${{ secrets.TEAMS_WEBHOOK }}
+          notification-summary: ${{ needs.process-event.outputs.message }}
+          notification-color: ${{ needs.process-event.outputs.priority == 'high' && 'FF0000' || 'FFA500' }}
+          timezone: UTC
+
+  # Push Notifications
+  push-notification:
+    name: Push Notification
+    runs-on: ubuntu-latest
+    needs: process-event
+    if: ${{ needs.process-event.outputs.priority == 'high' }}
+    steps:
+      - name: Send push notification
+        run: |
+          curl -X POST https://api.pushover.net/1/messages.json \
+            -F "token=${{ secrets.PUSHOVER_TOKEN }}" \
+            -F "user=${{ secrets.PUSHOVER_USER }}" \
+            -F "title=GitHub: ${{ github.repository }}" \
+            -F "message=${{ needs.process-event.outputs.message }}" \
+            -F "priority=${{ needs.process-event.outputs.priority == 'high' && '1' || '0' }}" \
+            -F "url=https://github.com/${{ github.repository }}" \
+            -F "url_title=View on GitHub"
+
+  # Notification Log
+  log-notification:
+    name: Log Notification
+    runs-on: ubuntu-latest
+    needs: [process-event, slack-notification, discord-notification, email-notification]
+    if: always()
+    steps:
+      - name: Log notification
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const log = {
+              timestamp: new Date().toISOString(),
+              event_type: '${{ needs.process-event.outputs.event_type }}',
+              priority: '${{ needs.process-event.outputs.priority }}',
+              message: '${{ needs.process-event.outputs.message }}',
+              channels: ${{ needs.process-event.outputs.channels }},
+              status: {
+                slack: '${{ needs.slack-notification.result }}',
+                discord: '${{ needs.discord-notification.result }}',
+                email: '${{ needs.email-notification.result }}'
+              },
+              context: {
+                repository: context.repo,
+                actor: context.actor,
+                event: context.eventName,
+                sha: context.sha,
+                ref: context.ref
+              }
+            };
+            
+            console.log('Notification Log:', JSON.stringify(log, null, 2));

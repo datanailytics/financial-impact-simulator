@@ -1,0 +1,284 @@
+version: '3.8'
+
+services:
+  # Jupyter Lab service for interactive development
+  jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile.jupyter
+    container_name: analytics-jupyter
+    ports:
+      - "8888:8888"  # Jupyter Lab
+      - "8080:8080"  # Code Server (VS Code)
+      - "8787:8787"  # RStudio Server
+    volumes:
+      - ./notebooks:/home/jovyan/work/notebooks
+      - ./data:/home/jovyan/work/data
+      - ./src:/home/jovyan/work/src
+      - ./models:/home/jovyan/work/models
+      - ./outputs:/home/jovyan/work/outputs
+      - jupyter-config:/home/jovyan/.jupyter
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - GRANT_SUDO=yes
+      - ENABLE_CODE_SERVER=true
+      - CHOWN_HOME=yes
+      - CHOWN_HOME_OPTS=-R
+    networks:
+      - analytics-network
+    restart: unless-stopped
+
+  # Main development environment
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: analytics-dev
+    volumes:
+      - .:/workspace
+      - ~/.ssh:/home/devuser/.ssh:ro
+      - ~/.gitconfig:/home/devuser/.gitconfig:ro
+      - vscode-server:/home/devuser/.vscode-server
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql://analytics:analytics123@postgres:5432/analytics_dev
+      - REDIS_URL=redis://redis:6379/0
+      - MONGO_URL=mongodb://mongo:27017/analytics_dev
+    ports:
+      - "8000:8000"  # FastAPI
+      - "5000:5000"  # Flask
+      - "8501:8501"  # Streamlit
+      - "6006:6006"  # TensorBoard
+      - "5678:5678"  # Python debugger
+    networks:
+      - analytics-network
+    depends_on:
+      - postgres
+      - redis
+      - mongo
+    stdin_open: true
+    tty: true
+    command: /bin/bash
+
+  # PostgreSQL database
+  postgres:
+    image: postgres:15-alpine
+    container_name: analytics-postgres
+    environment:
+      - POSTGRES_USER=analytics
+      - POSTGRES_PASSWORD=analytics123
+      - POSTGRES_DB=analytics_dev
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - analytics-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U analytics"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching and message queue
+  redis:
+    image: redis:7-alpine
+    container_name: analytics-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - analytics-network
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MongoDB for document storage
+  mongo:
+    image: mongo:6
+    container_name: analytics-mongo
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=admin123
+      - MONGO_INITDB_DATABASE=analytics_dev
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+      - ./docker/mongo/init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js
+    networks:
+      - analytics-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MinIO for S3-compatible object storage
+  minio:
+    image: minio/minio:latest
+    container_name: analytics-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin123
+    volumes:
+      - minio-data:/data
+    networks:
+      - analytics-network
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # Elasticsearch for full-text search and analytics
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: analytics-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - analytics-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Kibana for Elasticsearch visualization
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: analytics-kibana
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    networks:
+      - analytics-network
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  # MLflow for experiment tracking
+  mlflow:
+    build:
+      context: ./docker/mlflow
+      dockerfile: Dockerfile
+    container_name: analytics-mlflow
+    ports:
+      - "5005:5000"
+    environment:
+      - BACKEND_STORE_URI=postgresql://analytics:analytics123@postgres:5432/mlflow
+      - DEFAULT_ARTIFACT_ROOT=s3://mlflow/artifacts
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin123
+    networks:
+      - analytics-network
+    depends_on:
+      - postgres
+      - minio
+    command: >
+      mlflow server
+      --backend-store-uri postgresql://analytics:analytics123@postgres:5432/mlflow
+      --default-artifact-root s3://mlflow/artifacts
+      --host 0.0.0.0
+
+  # Airflow for workflow orchestration (optional)
+  airflow:
+    image: apache/airflow:2.8.0
+    container_name: analytics-airflow
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://analytics:analytics123@postgres:5432/airflow
+      - AIRFLOW__CORE__FERNET_KEY=''
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+      - AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.basic_auth
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    ports:
+      - "8085:8080"
+    networks:
+      - analytics-network
+    depends_on:
+      - postgres
+    command: bash -c "airflow db init && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com && airflow webserver & airflow scheduler"
+
+  # pgAdmin for PostgreSQL management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: analytics-pgadmin
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@analytics.com
+      - PGADMIN_DEFAULT_PASSWORD=admin123
+      - PGADMIN_CONFIG_SERVER_MODE=False
+      - PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED=False
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    networks:
+      - analytics-network
+    depends_on:
+      - postgres
+
+  # Grafana for monitoring and dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: analytics-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_INSTALL_PLUGINS=
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - analytics-network
+
+networks:
+  analytics-network:
+    driver: bridge
+    name: analytics-network
+
+volumes:
+  postgres-data:
+    name: analytics-postgres-data
+  redis-data:
+    name: analytics-redis-data
+  mongo-data:
+    name: analytics-mongo-data
+  minio-data:
+    name: analytics-minio-data
+  elasticsearch-data:
+    name: analytics-elasticsearch-data
+  jupyter-config:
+    name: analytics-jupyter-config
+  vscode-server:
+    name: analytics-vscode-server
+  pgadmin-data:
+    name: analytics-pgadmin-data
+  grafana-data:
+    name: analytics-grafana-data

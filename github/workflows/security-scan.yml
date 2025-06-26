@@ -1,0 +1,360 @@
+name: Security Scanning
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 2 * * *'  # Daily at 2 AM
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  # Dependency Scanning
+  dependency-scan:
+    name: Dependency Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Snyk to check for vulnerabilities
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high --json-file-output=snyk-results.json
+
+      - name: Upload Snyk results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-results.sarif
+
+      - name: OWASP Dependency Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: 'Financial Simulator'
+          path: '.'
+          format: 'ALL'
+          args: >
+            --enableRetired
+            --enableExperimental
+            --log ./dependency-check.log
+
+      - name: Upload OWASP results
+        uses: actions/upload-artifact@v3
+        with:
+          name: dependency-check-results
+          path: reports/
+
+      - name: NPM Audit
+        run: |
+          npm audit --json > npm-audit.json || true
+          npm audit fix --dry-run --json > npm-audit-fix.json || true
+          
+          # Generate audit report
+          node scripts/process-npm-audit.js
+
+      - name: Python Safety Check
+        run: |
+          pip install safety
+          safety check --json > safety-results.json || true
+          
+          # Process results
+          python scripts/process-safety-results.py
+
+  # Container Scanning
+  container-scan:
+    name: Container Security Scan
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ github.repository }}:scan .
+          docker save ${{ github.repository }}:scan -o image.tar
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          input: image.tar
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          vuln-type: 'os,library'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Run Grype scanner
+        uses: anchore/scan-action@v3
+        with:
+          image: ${{ github.repository }}:scan
+          fail-build: false
+          severity-cutoff: high
+
+      - name: Run Syft SBOM generator
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ github.repository }}:scan
+          format: cyclonedx-json
+
+  # Infrastructure Scanning
+  infrastructure-scan:
+    name: Infrastructure Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Terraform security scan
+        uses: aquasecurity/tfsec-action@v1.0.0
+        with:
+          soft_fail: true
+          format: sarif
+          output: tfsec-results.sarif
+
+      - name: Upload Terraform results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: tfsec-results.sarif
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: .
+          quiet: true
+          soft_fail: true
+          framework: all
+          output_format: sarif
+          output_file_path: checkov-results.sarif
+
+      - name: Upload Checkov results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-results.sarif
+
+  # Secret Scanning
+  secret-scan:
+    name: Secret Detection
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: TruffleHog OSS
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --debug --only-verified
+
+      - name: Detect Secrets
+        run: |
+          pip install detect-secrets
+          detect-secrets scan --baseline .secrets.baseline
+          detect-secrets audit .secrets.baseline
+
+  # SAST Scanning
+  sast-scan:
+    name: Static Application Security Testing
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/security-audit
+            p/secrets
+            p/owasp-top-ten
+            p/javascript
+            p/python
+            p/docker
+          generateSarif: true
+
+      - name: Upload Semgrep results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: ESLint Security Plugin
+        run: |
+          npm install --save-dev eslint-plugin-security
+          npx eslint . --ext .js,.jsx,.ts,.tsx --format json --output-file eslint-security.json || true
+          node scripts/process-eslint-security.js
+
+  # License Compliance
+  license-scan:
+    name: License Compliance Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: License Finder
+        run: |
+          gem install license_finder
+          license_finder report --format json > licenses.json
+          
+          # Check for problematic licenses
+          node scripts/check-licenses.js
+
+      - name: FOSSA Scan
+        uses: fossas/fossa-action@main
+        with:
+          api-key: ${{ secrets.FOSSA_API_KEY }}
+
+  # Security Report Generation
+  generate-report:
+    name: Generate Security Report
+    runs-on: ubuntu-latest
+    needs: [dependency-scan, container-scan, infrastructure-scan, secret-scan, sast-scan, license-scan]
+    if: always()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all scan results
+        uses: actions/download-artifact@v3
+        with:
+          path: scan-results
+
+      - name: Generate consolidated report
+        run: |
+          python scripts/generate-security-report.py \
+            --scan-results scan-results \
+            --output-dir security-reports \
+            --format html,pdf,json,markdown
+
+      - name: Calculate security score
+        id: security-score
+        run: |
+          score=$(python scripts/calculate-security-score.py --results scan-results)
+          echo "score=$score" >> $GITHUB_OUTPUT
+          
+          # Generate badge
+          python scripts/generate-security-badge.py --score $score
+
+      - name: Update README with security badge
+        if: github.ref == 'refs/heads/main'
+        run: |
+          sed -i "s/security-.*-blue/security-${{ steps.security-score.outputs.score }}%25-blue/g" README.md
+          
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add README.md
+          git commit -m "Update security score badge" || echo "No changes"
+          git push
+
+      - name: Upload security reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-reports
+          path: security-reports/
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('security-reports/summary.md', 'utf8');
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🔒 Security Scan Results\n\n${report}\n\n**Security Score**: ${{ steps.security-score.outputs.score }}%`
+            });
+
+  # Compliance Checks
+  compliance-check:
+    name: Compliance Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: CIS Benchmark scan
+        run: |
+          docker run --rm -v $(pwd):/src \
+            aquasec/trivy config /src \
+            --compliance docker-cis
+
+      - name: PCI DSS compliance check
+        run: |
+          pip install pci-dss-compliance-checker
+          pci-compliance-check --config .compliance/pci-dss.yml
+
+      - name: GDPR compliance scan
+        run: |
+          npm install -g gdpr-cli
+          gdpr-cli scan --output gdpr-report.json
+
+      - name: Generate compliance report
+        run: |
+          python scripts/generate-compliance-report.py \
+            --standards "CIS,PCI-DSS,GDPR,HIPAA" \
+            --output compliance-report.html
+
+  # Security Notifications
+  notify-results:
+    name: Security Scan Notifications
+    runs-on: ubuntu-latest
+    needs: [generate-report]
+    if: always()
+    steps:
+      - name: Send Slack notification
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: |
+            Security Scan Complete
+            Score: ${{ needs.generate-report.outputs.score }}%
+            View full report: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+
+      - name: Create security issue if critical
+        if: needs.generate-report.outputs.score < 70
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '⚠️ Security Score Below Threshold',
+              body: `The security score has fallen below the acceptable threshold.
+              
+              **Current Score**: ${{ needs.generate-report.outputs.score }}%
+              **Threshold**: 70%
+              
+              Please review the [security report](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) and address the identified issues.`,
+              labels: ['security', 'priority:high']
+            });
